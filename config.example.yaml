@@ -1,0 +1,129 @@
+# Peru BioRisk AI — Configuration
+# Copy this file to config.yaml and fill in your credentials.
+# NEVER commit config.yaml to version control.
+
+project:
+  name: peru-biorisk-ai
+  version: "0.1.0"
+  log_level: INFO  # DEBUG | INFO | WARNING | ERROR
+
+# ── Database ──────────────────────────────────────────────────────────────────
+database:
+  host: localhost
+  port: 5432
+  name: biorisk
+  user: biorisk
+  password: CHANGE_ME
+  postgis_schema: spatial
+
+timescale:
+  host: localhost
+  port: 5432
+  name: biorisk_ts
+  user: biorisk
+  password: CHANGE_ME
+
+# ── Object storage (MinIO / S3-compatible) ───────────────────────────────────
+storage:
+  endpoint: http://localhost:9000
+  access_key: CHANGE_ME
+  secret_key: CHANGE_ME
+  buckets:
+    raw: biorisk-raw
+    processed: biorisk-processed
+    features: biorisk-features
+    models: biorisk-models
+
+# ── External data APIs ────────────────────────────────────────────────────────
+apis:
+  senamhi:
+    base_url: https://api.senamhi.gob.pe/api/v1
+    token: CHANGE_ME
+
+  cds:  # Copernicus Climate Data Store (ERA5)
+    url: https://cds.climate.copernicus.eu/api/v2
+    key: CHANGE_ME  # Format: UID:API_KEY from https://cds.climate.copernicus.eu
+
+  nasa_earthdata:  # MODIS downloads
+    username: CHANGE_ME
+    password: CHANGE_ME
+
+  google_earth_engine:
+    service_account: CHANGE_ME@project.iam.gserviceaccount.com
+    key_file: configs/gee_key.json  # DO NOT commit this file
+
+  gbif:
+    username: CHANGE_ME
+    password: CHANGE_ME
+
+  geobosques:
+    base_url: https://geobosques.minam.gob.pe/geobosque/api
+    token: CHANGE_ME
+
+# ── MLflow ────────────────────────────────────────────────────────────────────
+mlflow:
+  tracking_uri: http://localhost:5000
+  experiment_name: peru-biorisk-ai
+  artifact_location: s3://biorisk-models/mlflow
+
+# ── Airflow ───────────────────────────────────────────────────────────────────
+airflow:
+  base_url: http://localhost:8080
+  username: admin
+  password: CHANGE_ME
+
+# ── ETL settings ──────────────────────────────────────────────────────────────
+etl:
+  target_crs: "EPSG:32718"       # WGS 84 / UTM zone 18S
+  target_resolution_m: 1000      # 1 km grid
+  n_workers: 4
+  chunk_size_mb: 256
+  imputation_method: mice        # mice | knn | forward_fill
+
+# ── Feature engineering ───────────────────────────────────────────────────────
+features:
+  climate_lags_weeks: [1, 2, 4, 8]
+  precipitation_windows_days: [15, 30, 60]
+  spatial_lag_order: queen       # queen | rook
+  biorisk_weights:
+    climate: 0.30
+    habitat: 0.25
+    epi: 0.25
+    social: 0.20
+
+# ── Models ────────────────────────────────────────────────────────────────────
+models:
+  diseases:
+    - dengue
+    - malaria
+    - leptospirosis
+    - leishmaniasis
+    - bartonellosis
+  forecast_horizons_weeks: [4, 8, 12]
+  validation:
+    spatial_blocks: 5
+    block_size_km: 50
+    temporal_holdout_months: 6
+
+# ── API ───────────────────────────────────────────────────────────────────────
+api:
+  host: 0.0.0.0
+  port: 8000
+  rate_limit_per_min: 100
+  cors_origins:
+    - "http://localhost:3000"
+    - "https://dashboard.perubiorisk.ai"
+
+# ── Alerts ────────────────────────────────────────────────────────────────────
+alerts:
+  thresholds:
+    warning: 0.40
+    alert: 0.65
+    critical: 0.80
+  webhook_urls: []  # Add your endpoint URLs here
+  smtp:
+    host: smtp.example.com
+    port: 587
+    user: CHANGE_ME
+    password: CHANGE_ME
+    from: alerts@perubiorisk.ai

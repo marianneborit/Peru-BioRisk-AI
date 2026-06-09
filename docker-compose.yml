@@ -1,0 +1,161 @@
+version: "3.9"
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.2-python3.11
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__WEBSERVER__SECRET_KEY: biorisk-secret-change-in-prod
+    _PIP_ADDITIONAL_REQUIREMENTS: "geopandas rasterio xarray cdsapi sentinelsat"
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./configs:/opt/airflow/configs:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+
+  # ── PostgreSQL + PostGIS + TimescaleDB ────────────────────────────────────
+  postgres:
+    image: timescale/timescaledb-ha:pg16-latest
+    environment:
+      POSTGRES_USER: biorisk
+      POSTGRES_PASSWORD: biorisk
+      POSTGRES_MULTIPLE_DATABASES: biorisk,airflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U biorisk"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO (S3-compatible object storage) ──────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: biorisk
+      MINIO_ROOT_PASSWORD: biorisk123
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ── MLflow tracking server ────────────────────────────────────────────────
+  mlflow:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.mlflow
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: biorisk
+      AWS_SECRET_ACCESS_KEY: biorisk123
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://biorisk:biorisk@postgres:5432/biorisk
+      --artifacts-destination s3://biorisk-models/mlflow
+      --host 0.0.0.0
+      --port 5000
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+      - minio
+
+  # ── Airflow webserver ─────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Airflow scheduler ─────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+
+  # ── Airflow init ──────────────────────────────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username admin --password admin
+          --firstname Admin --lastname User --role Admin
+          --email admin@perubiorisk.ai
+      "
+    restart: "no"
+
+  # ── Peru BioRisk AI API ───────────────────────────────────────────────────
+  api:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.api
+    environment:
+      CONFIG_PATH: /app/configs/config.yaml
+      DATABASE_URL: postgresql+asyncpg://biorisk:biorisk@postgres:5432/biorisk
+    volumes:
+      - ../../configs/config.yaml:/app/configs/config.yaml:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - mlflow
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Grafana (monitoring) ──────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: biorisk
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - postgres
+
+  # ── pg_tileserv (vector tiles from PostGIS) ───────────────────────────────
+  tileserv:
+    image: pramsey/pg_tileserv:latest
+    environment:
+      DATABASE_URL: postgresql://biorisk:biorisk@postgres:5432/biorisk
+    ports:
+      - "7800:7800"
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
+  miniodata:
+  grafanadata:
+
+networks:
+  default:
+    name: biorisk-network
